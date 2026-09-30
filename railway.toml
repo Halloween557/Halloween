@@ -1,0 +1,6 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "pip install -r cloud/requirements.txt && python cloud_worker.py"
+restartPolicyType = "always"

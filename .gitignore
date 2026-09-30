@@ -1,0 +1,24 @@
+.env
+.neon
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Web
+web/node_modules/
+web/.next/
+web/.env
+web/.env.local
+web/.vercel
+.vercel
+
+# WhatsApp bridge deps
+whatsapp-bridge/node_modules/
+whatsapp-bridge/.wwebjs_auth/
+whatsapp-bridge/.wwebjs_cache/
+
+# Logs
+*.log
+voice.log
+voice_err.log

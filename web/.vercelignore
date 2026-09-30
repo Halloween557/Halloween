@@ -1,0 +1,6 @@
+dev.log
+voice.log
+voice_err.log
+node_modules
+.next
+.vercel
