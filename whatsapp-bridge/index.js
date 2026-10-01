@@ -250,7 +250,25 @@ app.get('/chats', async (req, res) => {
             total: chats.length
         });
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        console.error('[ERR] getChats error:', e);
+        try {
+            // Fallback for newer WhatsApp Web clients where getChats() encounters non-standard chat objects
+            const contacts = await client.getContacts();
+            const recentContacts = contacts
+                .filter(c => c.isMyContact || c.name)
+                .slice(0, Math.min(parseInt(req.query.limit, 10) || 20, 50))
+                .map(c => ({
+                    id: c.id._serialized,
+                    name: c.name || c.pushname || c.number || 'Unknown',
+                    isGroup: c.isGroup || false,
+                    unreadCount: 0,
+                    lastMessage: null,
+                    pinned: false
+                }));
+            return res.json({ chats: recentContacts, total: recentContacts.length, fallback: true });
+        } catch (e2) {
+            res.status(500).json({ error: e.message || String(e) });
+        }
     }
 });
 
@@ -260,13 +278,29 @@ app.get('/search', async (req, res) => {
     const q = (req.query.q || '').toLowerCase().trim();
     if (!q) return res.status(400).json({ error: 'Provide ?q=name' });
     try {
-        const chats = await client.getChats();
-        const matches = chats.filter(c => {
-            const name = (c.name || '').toLowerCase();
-            const id = (c.id._serialized || '').toLowerCase();
-            return name.includes(q) || id.includes(q);
-        }).slice(0, 20).map(fmtChat);
-        res.json({ results: matches, count: matches.length });
+        let chats = [];
+        try {
+            chats = await client.getChats();
+            const matches = chats.filter(c => {
+                const name = (c.name || '').toLowerCase();
+                const id = (c.id._serialized || '').toLowerCase();
+                return name.includes(q) || id.includes(q);
+            }).slice(0, 20).map(fmtChat);
+            return res.json({ results: matches, count: matches.length });
+        } catch (_) {
+            const contacts = await client.getContacts();
+            const matches = contacts.filter(c => {
+                const name = (c.name || c.pushname || '').toLowerCase();
+                const number = (c.number || '').toLowerCase();
+                return name.includes(q) || number.includes(q);
+            }).slice(0, 20).map(c => ({
+                id: c.id._serialized,
+                name: c.name || c.pushname || c.number,
+                unreadCount: 0,
+                lastMessage: null
+            }));
+            return res.json({ results: matches, count: matches.length, fallback: true });
+        }
     } catch (e) {
         res.status(500).json({ error: e.message });
     }

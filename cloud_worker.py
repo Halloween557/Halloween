@@ -59,6 +59,7 @@ CLOUD_TOOLS = {
     "remember", "recall", "forget",
     "schedule_goal", "list_goals", "cancel_goal", "complete_goal",
     "web_search", "read_webpage",
+    "email_list_unread", "email_read", "email_search", "email_send",
 }
 
 REPLY_PREFIX = "☁️ (Windows PC offline \u2014 answered from cloud)\n\n"

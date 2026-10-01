@@ -60,7 +60,29 @@ npm start
 Login with the **AGENT_TOKEN** from `.env`. Features: chat, voice input, wake-word
 ("Hey Gideon"), memories drawer, TTS, "Clear" button.
 
-### c) Voice listener (optional, ambient microphone)
+### c) WhatsApp Bridge (for WhatsApp on Phone)
+```powershell
+node whatsapp-bridge\index.js
+```
+On first launch, scan the QR code displayed in your terminal or open `http://localhost:3001/qr` on your browser to scan with your phone:
+**WhatsApp > Linked Devices > Link a Device**.
+Once authenticated, the credentials are saved to `.wwebjs_auth/`.
+
+### d) Email Setup (Gmail / Outlook / IMAP / SMTP)
+Add your credentials to `.env`:
+```ini
+EMAIL_ADDRESS=your.email@gmail.com
+EMAIL_PASSWORD=your-app-password
+EMAIL_IMAP_SERVER=imap.gmail.com
+EMAIL_SMTP_SERVER=smtp.gmail.com
+```
+Now you can ask Gideon:
+- *"Check my unread emails"*
+- *"Search emails from John"*
+- *"Read email 102"*
+- *"Send an email to sarah@example.com saying..."* (Gideon will show the draft and ask for confirmation before sending)
+
+### e) Voice listener (optional, ambient microphone)
 ```powershell
 python voice_listener.py
 ```
@@ -72,7 +94,7 @@ Microphone Array (Intel Smart ...)
 ```
 Say **"Hey Gideon"** or **"Gideon, [command]"**. Voice TTS uses Windows speech synthesis.
 
-### d) Legacy bare-bones chat server (optional)
+### f) Legacy bare-bones chat server (optional)
 The old single-session FastAPI server with `AGENT_TOKEN` auth:
 ```powershell
 uvicorn server:app --port 8000

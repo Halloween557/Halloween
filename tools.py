@@ -24,7 +24,7 @@ except ImportError:
 # Anything in here requires the user to explicitly confirm before running.
 # NOTE: run_powershell is NOT listed here — it is handled separately via
 # is_destructive_command() which inspects the command string for dangerous patterns.
-DESTRUCTIVE_TOOLS = {"delete_file", "kill_process", "shutdown_or_restart"}
+DESTRUCTIVE_TOOLS = {"delete_file", "kill_process", "shutdown_or_restart", "email_send", "whatsapp_send_message"}
 
 # Keywords that make an otherwise-normal powershell command destructive.
 DESTRUCTIVE_PS_PATTERNS = [
@@ -192,7 +192,9 @@ def shutdown_or_restart(action: str) -> str:
 
 
 def _clean_text(s: str) -> str:
-    """Strip mojibake/replacement chars and normalize unicode to ASCII-safe output."""
+    """Strip mojibake/replacement chars and normalize unicode to clean text."""
+    if not s:
+        return ""
     s = (s.replace("\ufffd", "").replace("\uffff", "").replace("\x00", "")
          .replace("\u201c", '"').replace("\u201d", '"')
          .replace("\u2018", "'").replace("\u2019", "'")
@@ -200,7 +202,9 @@ def _clean_text(s: str) -> str:
          .replace("\u2122", "").replace("\u00ae", "").replace("\u00a9", "")
          .replace("\u2026", "...").replace("\u00a0", " "))
     s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", s)
-    return s.strip()
+    # Remove surrogate or non-printable astral characters that break Windows console
+    s = re.sub(r"[^\x00-\x7F\u00A0-\u024F\u1E00-\u1EFF]", " ", s)
+    return re.sub(r" +", " ", s).strip()
 
 
 def web_search(query: str, max_results: int = 5) -> str:
@@ -342,6 +346,220 @@ def whatsapp_send_message(chat_id: str, message: str) -> str:
         return f"Successfully sent WhatsApp message to {data.get('chatName', chat_id)}: '{message}'"
     except Exception as e:
         return f"Error sending WhatsApp message: {e}"
+
+
+# ---- Email Tools (IMAP / SMTP) ----
+def _get_email_credentials():
+    address = os.environ.get("EMAIL_ADDRESS")
+    password = os.environ.get("EMAIL_PASSWORD")
+    imap_server = os.environ.get("EMAIL_IMAP_SERVER", "imap.gmail.com")
+    smtp_server = os.environ.get("EMAIL_SMTP_SERVER", "smtp.gmail.com")
+    imap_port = int(os.environ.get("EMAIL_PORT_IMAP", "993"))
+    smtp_port = int(os.environ.get("EMAIL_PORT_SMTP", "587"))
+
+    if not address or not password:
+        raise ValueError("EMAIL_ADDRESS and EMAIL_PASSWORD must be configured in .env to use email tools.")
+    return address, password, imap_server, smtp_server, imap_port, smtp_port
+
+
+def email_list_unread(limit: int = 5) -> str:
+    """List recent unread emails with sender, subject, date, and email ID."""
+    import imaplib
+    import email
+    from email.header import decode_header
+
+    try:
+        address, password, imap_server, _, imap_port, _ = _get_email_credentials()
+        mail = imaplib.IMAP4_SSL(imap_server, imap_port)
+        mail.login(address, password)
+        mail.select("INBOX")
+
+        status, messages = mail.search(None, "UNSEEN")
+        if status != "OK" or not messages[0]:
+            mail.logout()
+            return "No unread emails found in INBOX."
+
+        email_ids = messages[0].split()
+        email_ids = email_ids[-max(1, min(int(limit), 20)):]  # take the most recent
+        email_ids.reverse()
+
+        results = [f"Found {len(email_ids)} unread email(s):"]
+
+        for eid in email_ids:
+            res, msg_data = mail.fetch(eid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+            if res != "OK":
+                continue
+            raw_header = msg_data[0][1]
+            msg = email.message_from_bytes(raw_header)
+
+            # Decode Subject
+            subject, encoding = decode_header(msg.get("Subject", "(No Subject)"))[0]
+            if isinstance(subject, bytes):
+                subject = subject.decode(encoding or "utf-8", errors="replace")
+
+            sender = msg.get("From", "(Unknown Sender)")
+            date_str = msg.get("Date", "")
+            id_str = eid.decode() if isinstance(eid, bytes) else str(eid)
+
+            results.append(f"- [ID: {id_str}] From: {sender}\n  Subject: {subject}\n  Date: {date_str}")
+
+        mail.logout()
+        return "\n".join(results)
+    except Exception as e:
+        return f"Error listing unread emails: {e}"
+
+
+def email_read(email_id: str) -> str:
+    """Read full details and text body of an email by its ID."""
+    import imaplib
+    import email
+    from email.header import decode_header
+
+    try:
+        address, password, imap_server, _, imap_port, _ = _get_email_credentials()
+        mail = imaplib.IMAP4_SSL(imap_server, imap_port)
+        mail.login(address, password)
+        mail.select("INBOX")
+
+        res, msg_data = mail.fetch(email_id.encode() if isinstance(email_id, str) else email_id, "(RFC822)")
+        if res != "OK" or not msg_data or not msg_data[0]:
+            mail.logout()
+            return f"Could not find email with ID: {email_id}"
+
+        raw_email = msg_data[0][1]
+        msg = email.message_from_bytes(raw_email)
+
+        subject, encoding = decode_header(msg.get("Subject", "(No Subject)"))[0]
+        if isinstance(subject, bytes):
+            subject = subject.decode(encoding or "utf-8", errors="replace")
+
+        sender = msg.get("From", "(Unknown Sender)")
+        to = msg.get("To", "(Unknown Recipient)")
+        date_str = msg.get("Date", "")
+
+        # Extract body
+        body = ""
+        if msg.is_multipart():
+            for part in msg.walk():
+                ctype = part.get_content_type()
+                cdispo = str(part.get("Content-Disposition"))
+                if ctype == "text/plain" and "attachment" not in cdispo:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        charset = part.get_content_charset() or "utf-8"
+                        body = payload.decode(charset, errors="replace")
+                        break
+                elif ctype == "text/html" and not body and "attachment" not in cdispo:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        charset = part.get_content_charset() or "utf-8"
+                        html_text = payload.decode(charset, errors="replace")
+                        soup = BeautifulSoup(html_text, "html.parser")
+                        body = soup.get_text(separator="\n").strip()
+        else:
+            payload = msg.get_payload(decode=True)
+            if payload:
+                charset = msg.get_content_charset() or "utf-8"
+                body = payload.decode(charset, errors="replace")
+
+        mail.logout()
+
+        clean_body = _clean_text(body)
+        if len(clean_body) > 3500:
+            clean_body = clean_body[:3500] + "\n... [body truncated at 3500 chars]"
+
+        return (
+            f"Email ID: {email_id}\n"
+            f"From: {_clean_text(sender)}\n"
+            f"To: {_clean_text(to)}\n"
+            f"Date: {date_str}\n"
+            f"Subject: {_clean_text(subject)}\n\n"
+            f"--- Content ---\n{clean_body if clean_body else '(Empty body)'}"
+        )
+    except Exception as e:
+        return f"Error reading email {email_id}: {e}"
+
+
+def email_search(query: str, limit: int = 5) -> str:
+    """Search inbox emails by keyword, sender, or subject."""
+    import imaplib
+    import email
+    from email.header import decode_header
+
+    try:
+        address, password, imap_server, _, imap_port, _ = _get_email_credentials()
+        mail = imaplib.IMAP4_SSL(imap_server, imap_port)
+        mail.login(address, password)
+        mail.select("INBOX")
+
+        clean_q = query.replace('"', '').strip()
+        # Search in SUBJECT, FROM, or TEXT
+        search_criteria = f'(OR (OR SUBJECT "{clean_q}" FROM "{clean_q}") BODY "{clean_q}")'
+        status, messages = mail.search(None, search_criteria)
+
+        if status != "OK" or not messages[0]:
+            # Fallback simple search
+            status, messages = mail.search(None, f'TEXT "{clean_q}"')
+
+        if status != "OK" or not messages[0]:
+            mail.logout()
+            return f"No emails found matching query: '{query}'"
+
+        email_ids = messages[0].split()
+        email_ids = email_ids[-max(1, min(int(limit), 20)):]
+        email_ids.reverse()
+
+        results = [f"Found {len(email_ids)} email(s) matching '{query}':"]
+
+        for eid in email_ids:
+            res, msg_data = mail.fetch(eid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+            if res != "OK":
+                continue
+            raw_header = msg_data[0][1]
+            msg = email.message_from_bytes(raw_header)
+
+            subject, encoding = decode_header(msg.get("Subject", "(No Subject)"))[0]
+            if isinstance(subject, bytes):
+                subject = subject.decode(encoding or "utf-8", errors="replace")
+
+            sender = msg.get("From", "(Unknown Sender)")
+            date_str = msg.get("Date", "")
+            id_str = eid.decode() if isinstance(eid, bytes) else str(eid)
+
+            results.append(f"- [ID: {id_str}] From: {sender}\n  Subject: {subject}\n  Date: {date_str}")
+
+        mail.logout()
+        return "\n".join(results)
+    except Exception as e:
+        return f"Error searching emails: {e}"
+
+
+def email_send(to_email: str, subject: str, body: str) -> str:
+    """Send an email via SMTP. DESTRUCTIVE - requires user confirmation."""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    try:
+        address, password, _, smtp_server, _, smtp_port = _get_email_credentials()
+
+        msg = MIMEMultipart()
+        msg["From"] = address
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        server = smtplib.SMTP(smtp_server, smtp_port, timeout=20)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(address, password)
+        server.sendmail(address, [to_email], msg.as_string())
+        server.quit()
+
+        return f"Successfully sent email to {to_email} with subject: '{subject}'"
+    except Exception as e:
+        return f"Error sending email: {e}"
 
 
 # ---- Memory tools (injected at runtime by poller.py with DB context) ----
@@ -637,6 +855,75 @@ TOOL_SCHEMAS = MEMORY_TOOL_SCHEMAS + GOAL_TOOL_SCHEMAS + [
             "required": ["chat_id", "message"],
         },
     },
+    {
+        "name": "email_list_unread",
+        "description": "Check and list recent unread emails with sender, subject, date, and ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of unread emails to retrieve (default 5)",
+                    "default": 5,
+                },
+            },
+        },
+    },
+    {
+        "name": "email_read",
+        "description": "Read the full contents and text body of an email by its ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email_id": {
+                    "type": "string",
+                    "description": "The email ID to read (from email_list_unread or email_search)",
+                },
+            },
+            "required": ["email_id"],
+        },
+    },
+    {
+        "name": "email_search",
+        "description": "Search inbox emails by keyword, sender name/address, or subject.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query (e.g. sender name, topic, or keyword)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results (default 5)",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "email_send",
+        "description": "Send an email or reply to an address. DESTRUCTIVE - requires user confirmation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to_email": {
+                    "type": "string",
+                    "description": "Recipient email address",
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Email subject line",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "The full text message content to send",
+                },
+            },
+            "required": ["to_email", "subject", "body"],
+        },
+    },
 ]
 
 TOOL_FUNCTIONS = {
@@ -657,5 +944,9 @@ TOOL_FUNCTIONS = {
     "whatsapp_search_chats": whatsapp_search_chats,
     "whatsapp_read_messages": whatsapp_read_messages,
     "whatsapp_send_message": whatsapp_send_message,
+    "email_list_unread": email_list_unread,
+    "email_read": email_read,
+    "email_search": email_search,
+    "email_send": email_send,
 }
 

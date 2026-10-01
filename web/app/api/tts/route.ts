@@ -1,131 +1,116 @@
 import { NextResponse } from "next/server";
 import { checkAuth } from "@/lib/auth";
+import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const API_KEY = process.env.ELEVEN_API_KEY;
-const FIXED_VOICE = process.env.ELEVEN_VOICE_ID;
-const MODELS = ["eleven_multilingual_v2", "eleven_monolingual_v1"];
+// ---------------------------------------------------------------------------
+// Voice priority:
+//   1. ElevenLabs (Daniel – UK male) — if ELEVEN_API_KEY set & quota available
+//   2. Microsoft Edge TTS (en-GB-RyanNeural) — free, no quota, no API key
+// ---------------------------------------------------------------------------
 
-// UK premade voices, tried in order until one synthesizes on this key.
-// Daniel (British, male) is verified working; the rest are fallbacks for
-// accounts with different voice sets.
-const BRITISH_VOICES = [
-  "onwK4e9ZLuTAKqWW03F9", // Daniel - UK male
-  "AZnzlk1XvdacUQEj1gxn", // Domi - UK female
-  "XrExE9yKIg1Wjnnl2kAx", // George - UK male
-  "JS3qFdMiah4wzXGQlvfs", // Freya - UK female
-];
+const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY;
+const ELEVEN_VOICE_ID =
+  process.env.ELEVEN_VOICE_ID ?? "onwK4e9ZLuTAKqWW03F9"; // Daniel – UK male
 
-let cachedVoiceId: string | null = null;
+// ── ElevenLabs ──────────────────────────────────────────────────────────────
 
-interface ElevenVoice {
-  voice_id: string;
-  name: string;
-  category?: string;
-  labels?: Record<string, string>;
-  description?: string;
-}
-
-function britishScore(v: ElevenVoice): number {
-  const hay = [
-    v.name,
-    v.labels?.accent ?? "",
-    v.labels?.description ?? "",
-    v.labels?.["language_region"] ?? "",
-    v.labels?.language ?? "",
-    v.description ?? "",
-  ].join(" ").toLowerCase();
-  let score = 0;
-  if (hay.includes("british")) score += 4;
-  if (hay.includes("en-gb") || hay.includes("english (uk)") || hay.includes("english (gb)")) score += 3;
-  if (v.name.toLowerCase().includes("george") || v.name.toLowerCase().includes("callum") ||
-      v.name.toLowerCase().includes("freya") || v.name.toLowerCase().includes("domi")) score += 2;
-  if (v.category === "premade") score += 1;
-  return score;
-}
-
-async function pickVoice(): Promise<string | null> {
-  if (FIXED_VOICE) return FIXED_VOICE;
-  if (!API_KEY) return null;
-  try {
-    const res = await fetch("https://api.elevenlabs.io/v1/voices", {
-      headers: { "xi-api-key": API_KEY },
-      cache: "no-store",
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { voices?: ElevenVoice[] };
-    const voices = data.voices ?? [];
-    const candidates = voices
-      .map((v) => ({ v, score: britishScore(v) }))
-      .sort((a, b) => b.score - a.score);
-    const best = candidates[0];
-    return best && best.score > 0 ? best.v.voice_id : null;
-  } catch {
-    return null;
-  }
-}
-
-async function synthesize(voiceId: string, text: string): Promise<NextResponse | null> {
-  for (const model of MODELS) {
+async function elevenLabsTts(text: string): Promise<NextResponse | null> {
+  if (!ELEVEN_API_KEY) return null;
+  const models = ["eleven_multilingual_v2", "eleven_monolingual_v1"];
+  for (const model of models) {
     try {
-      const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
-        method: "POST",
-        headers: {
-          "xi-api-key": API_KEY!,
-          "Content-Type": "application/json",
-          Accept: "audio/mpeg",
-        },
-        body: JSON.stringify({
-          text,
-          model_id: model,
-          voice_settings: { stability: 0.45, similarity_boost: 0.8, style: 0.2 },
-        }),
-      });
+      const res = await fetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}`,
+        {
+          method: "POST",
+          headers: {
+            "xi-api-key": ELEVEN_API_KEY,
+            "Content-Type": "application/json",
+            Accept: "audio/mpeg",
+          },
+          body: JSON.stringify({
+            text,
+            model_id: model,
+            voice_settings: { stability: 0.45, similarity_boost: 0.8, style: 0.2 },
+          }),
+        }
+      );
       if (res.ok) {
         const audio = Buffer.from(await res.arrayBuffer());
         return new NextResponse(audio, {
           status: 200,
-          headers: { "Content-Type": "audio/mpeg", "Cache-Control": "no-store" },
+          headers: {
+            "Content-Type": "audio/mpeg",
+            "Cache-Control": "no-store",
+            "X-TTS-Engine": "elevenlabs",
+          },
         });
       }
-      await res.text().catch(() => "");
-    } catch {
-      // try next model / voice
+      const err = await res.text().catch(() => "");
+      console.warn(`[TTS] ElevenLabs ${model} failed (${res.status}):`, err);
+    } catch (e) {
+      console.warn("[TTS] ElevenLabs network error:", e);
     }
   }
   return null;
 }
 
+// ── Microsoft Edge TTS — en-GB-RyanNeural (free British male neural voice) ──
+
+async function edgeTts(text: string): Promise<NextResponse | null> {
+  try {
+    const tts = new MsEdgeTTS();
+    await tts.setMetadata(
+      "en-GB-RyanNeural",
+      OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3
+    );
+
+    // Wrap in a Promise to collect the audio stream
+    const audio = await new Promise<Buffer>((resolve, reject) => {
+      try {
+        const { audioStream } = tts.toStream(text);
+        const chunks: Buffer[] = [];
+        audioStream.on("data", (chunk: Buffer) => chunks.push(chunk));
+        audioStream.on("end", () => resolve(Buffer.concat(chunks)));
+        audioStream.on("error", reject);
+      } catch (e) {
+        reject(e);
+      }
+    });
+
+    if (!audio || audio.length === 0) return null;
+
+    return new NextResponse(new Uint8Array(audio), {
+      status: 200,
+      headers: {
+        "Content-Type": "audio/mpeg",
+        "Cache-Control": "no-store",
+        "X-TTS-Engine": "edge-ryan-gb",
+      },
+    });
+  } catch (e) {
+    console.warn("[TTS] Edge TTS error:", e);
+    return null;
+  }
+}
+
+// ── Main handler ─────────────────────────────────────────────────────────────
+
 export async function POST(req: Request) {
   const denied = checkAuth(req);
   if (denied) return denied;
-  if (!API_KEY) {
-    return NextResponse.json({ error: "ELEVEN_API_KEY not configured" }, { status: 500 });
-  }
-  const body = (await req.json().catch(() => ({}))) as { text?: string; voice_id?: string };
+
+  const body = (await req.json().catch(() => ({}))) as { text?: string };
   const text = (body.text ?? "").trim().slice(0, 2000);
   if (!text) return NextResponse.json({ error: "no text" }, { status: 400 });
 
-  const candidates = [
-    FIXED_VOICE,
-    body.voice_id,
-    cachedVoiceId,
-    await pickVoice(),
-    ...BRITISH_VOICES,
-  ].filter((v): v is string => Boolean(v));
+  // Try ElevenLabs first (best quality), then Edge TTS (always free)
+  const result = (await elevenLabsTts(text)) ?? (await edgeTts(text));
 
-  let last: NextResponse | null = null;
-  for (const voiceId of candidates) {
-    last = await synthesize(voiceId, text);
-    if (last) {
-      cachedVoiceId = voiceId;
-      return last;
-    }
-  }
-  return NextResponse.json(
-    { error: "no suitable TTS voice/model succeeded for this key" },
-    { status: 500 },
-  );
+  if (result) return result;
+
+  return NextResponse.json({ error: "All TTS engines failed" }, { status: 500 });
 }
