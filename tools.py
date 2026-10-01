@@ -24,7 +24,7 @@ except ImportError:
 # Anything in here requires the user to explicitly confirm before running.
 # NOTE: run_powershell is NOT listed here — it is handled separately via
 # is_destructive_command() which inspects the command string for dangerous patterns.
-DESTRUCTIVE_TOOLS = {"delete_file", "kill_process", "shutdown_or_restart", "email_send", "whatsapp_send_message"}
+DESTRUCTIVE_TOOLS = {"delete_file", "kill_process", "shutdown_or_restart", "email_send", "whatsapp_send_message", "close_window"}
 
 # Keywords that make an otherwise-normal powershell command destructive.
 DESTRUCTIVE_PS_PATTERNS = [
@@ -64,12 +64,16 @@ def open_application(app_name: str) -> str:
     try:
         os.startfile(app_name)  # Windows-only
         return f"Launched {app_name}"
-    except Exception as e:
+    except FileNotFoundError:
         try:
             subprocess.Popen(app_name, shell=True)
             return f"Launched {app_name}"
+        except FileNotFoundError:
+            return f"Application not found: {app_name}"
         except Exception as e2:
             return f"Error launching {app_name}: {e2}"
+    except Exception as e:
+        return f"Error launching {app_name}: {e}"
 
 
 SENSITIVE_FILENAMES = {
@@ -94,6 +98,9 @@ def is_sensitive_path(p: Path) -> bool:
 
 def read_file(path: str) -> str:
     try:
+        # Basic path validation to prevent directory traversal
+        if ".." in path or path.startswith("/") or (len(path) > 1 and path[1] == ":"):
+            return "Error: Invalid path. Relative paths within the current directory are required."
         p = Path(path)
         if not p.exists():
             return f"File not found: {path}"
@@ -108,6 +115,9 @@ def read_file(path: str) -> str:
 
 def write_file(path: str, content: str) -> str:
     try:
+        # Basic path validation to prevent directory traversal
+        if ".." in path or path.startswith("/") or (len(path) > 1 and path[1] == ":"):
+            return "Error: Invalid path. Relative paths within the current directory are required."
         p = Path(path)
         if is_sensitive_path(p):
             return f"Access denied: Writing to {p.name} is blocked for security."
@@ -120,6 +130,9 @@ def write_file(path: str, content: str) -> str:
 
 def list_directory(path: str) -> str:
     try:
+        # Basic path validation to prevent directory traversal
+        if ".." in path or path.startswith("/") or (len(path) > 1 and path[1] == ":"):
+            return "Error: Invalid path. Relative paths within the current directory are required."
         p = Path(path)
         if not p.exists():
             return f"Path not found: {path}"
@@ -134,6 +147,9 @@ def list_directory(path: str) -> str:
 
 def delete_file(path: str) -> str:
     try:
+        # Basic path validation to prevent directory traversal
+        if ".." in path or path.startswith("/") or (len(path) > 1 and path[1] == ":"):
+            return "Error: Invalid path. Relative paths within the current directory are required."
         p = Path(path)
         if is_sensitive_path(p):
             return f"Access denied: Deleting {p.name} is blocked for security."
@@ -156,7 +172,7 @@ def list_processes() -> str:
             mem = info.get("memory_percent") or 0.0
             if pid is not None:
                 procs.append((mem, pid, name))
-        except Exception:
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
     procs.sort(key=lambda x: x[0], reverse=True)
     lines = [f"{pid:>6}  {name:<30} mem={mem:.1f}%" for mem, pid, name in procs[:60]]
@@ -169,19 +185,378 @@ def kill_process(pid: int) -> str:
         name = p.name()
         p.terminate()
         return f"Terminated process {pid} ({name})"
+    except psutil.NoSuchProcess:
+        return f"Process {pid} not found (may have already terminated)."
+    except psutil.AccessDenied:
+        return f"Access denied: cannot terminate process {pid} (insufficient permissions)."
+    except ValueError:
+        return f"Invalid PID: {pid}"
     except Exception as e:
         return f"Error: {e}"
 
 
 def system_info() -> str:
-    cpu = psutil.cpu_percent(interval=0.5)
-    mem = psutil.virtual_memory()
-    disk = psutil.disk_usage("C:\\")
+    try:
+        cpu = psutil.cpu_percent(interval=0.5)
+    except Exception:
+        cpu = 0
+    try:
+        mem = psutil.virtual_memory()
+    except Exception:
+        mem = type('obj', (object,), {'percent': 0, 'used': 0, 'total': 1})()
+    try:
+        disk = psutil.disk_usage("C:\\")
+    except Exception:
+        disk = type('obj', (object,), {'percent': 0, 'used': 0, 'total': 1})()
+    
     return (
         f"CPU: {cpu}%\n"
         f"RAM: {mem.percent}% used ({mem.used // (1024**3)}GB / {mem.total // (1024**3)}GB)\n"
         f"Disk C: {disk.percent}% used ({disk.used // (1024**3)}GB / {disk.total // (1024**3)}GB)"
     )
+
+
+def take_screenshot(filename: str = "screenshot.png") -> str:
+    """Capture a screenshot of the primary monitor and save it to a file."""
+    try:
+        import pyautogui
+        # Validate filename to prevent path traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            return "Error: Invalid filename. Only a simple filename (no path) is allowed."
+        
+        # Ensure .png extension
+        if not filename.lower().endswith(".png"):
+            filename = filename + ".png"
+        
+        # Capture screenshot
+        screenshot = pyautogui.screenshot()
+        screenshot.save(filename)
+        return f"Screenshot saved to {filename}"
+    except ImportError:
+        return "Error: pyautogui package not installed. Run: python -m pip install pyautogui"
+    except Exception as e:
+        return f"Error taking screenshot: {e}"
+
+
+def get_clipboard_text() -> str:
+    """Read the current text content from the system clipboard."""
+    try:
+        import pyperclip
+        text = pyperclip.paste()
+        if not text:
+            return "Clipboard is empty or contains non-text content."
+        return text
+    except ImportError:
+        return "Error: pyperclip package not installed. Run: python -m pip install pyperclip"
+    except Exception as e:
+        return f"Error reading clipboard: {e}"
+
+
+def set_clipboard_text(text: str) -> str:
+    """Set the system clipboard to the provided text."""
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return f"Copied {len(text)} characters to clipboard."
+    except ImportError:
+        return "Error: pyperclip package not installed. Run: python -m pip install pyperclip"
+    except Exception as e:
+        return f"Error setting clipboard: {e}"
+
+
+def list_windows() -> str:
+    """List all visible windows with their titles and handles."""
+    try:
+        import pygetwindow as gw
+        windows = gw.getAllWindows()
+        if not windows:
+            return "No windows found."
+        
+        lines = ["Active windows:"]
+        for win in windows:
+            title = win.title or "(Untitled)"
+            if title:  # Only show windows with titles
+                lines.append(f"- {title}")
+        return "\n".join(lines)
+    except ImportError:
+        return "Error: pygetwindow package not installed. Run: python -m pip install pygetwindow"
+    except Exception as e:
+        return f"Error listing windows: {e}"
+
+
+def minimize_window(title: str) -> str:
+    """Minimize a window by its title (partial match)."""
+    try:
+        import pygetwindow as gw
+        windows = gw.getWindowsWithTitle(title)
+        if not windows:
+            return f"No window found matching '{title}'"
+        
+        for win in windows:
+            win.minimize()
+        return f"Minimized {len(windows)} window(s) matching '{title}'"
+    except ImportError:
+        return "Error: pygetwindow package not installed. Run: python -m pip install pygetwindow"
+    except Exception as e:
+        return f"Error minimizing window: {e}"
+
+
+def maximize_window(title: str) -> str:
+    """Maximize a window by its title (partial match)."""
+    try:
+        import pygetwindow as gw
+        windows = gw.getWindowsWithTitle(title)
+        if not windows:
+            return f"No window found matching '{title}'"
+        
+        for win in windows:
+            win.maximize()
+        return f"Maximized {len(windows)} window(s) matching '{title}'"
+    except ImportError:
+        return "Error: pygetwindow package not installed. Run: python -m pip install pygetwindow"
+    except Exception as e:
+        return f"Error maximizing window: {e}"
+
+
+def close_window(title: str) -> str:
+    """Close a window by its title (partial match). DESTRUCTIVE - requires user confirmation."""
+    try:
+        import pygetwindow as gw
+        windows = gw.getWindowsWithTitle(title)
+        if not windows:
+            return f"No window found matching '{title}'"
+        
+        for win in windows:
+            win.close()
+        return f"Closed {len(windows)} window(s) matching '{title}'"
+    except ImportError:
+        return "Error: pygetwindow package not installed. Run: python -m pip install pygetwindow"
+    except Exception as e:
+        return f"Error closing window: {e}"
+
+
+# ---- Google Calendar Tools ----
+def _get_calendar_credentials():
+    """Get Google Calendar API credentials from environment variables."""
+    import json
+    
+    credentials_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    if not credentials_json:
+        raise ValueError("GOOGLE_CREDENTIALS_JSON must be configured in .env to use calendar tools.")
+    
+    try:
+        return json.loads(credentials_json)
+    except json.JSONDecodeError:
+        raise ValueError("GOOGLE_CREDENTIALS_JSON must be valid JSON.")
+
+
+def list_calendar_events(max_results: int = 10, days_ahead: int = 7) -> str:
+    """List upcoming Google Calendar events."""
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+        from datetime import datetime, timedelta
+        
+        credentials_dict = _get_calendar_credentials()
+        
+        # Create credentials from dict
+        credentials = Credentials.from_authorized_user_info(credentials_dict)
+        
+        # Build the service
+        service = build('calendar', 'v3', credentials=credentials)
+        
+        # Calculate time range
+        now = datetime.utcnow()
+        time_max = now + timedelta(days=days_ahead)
+        
+        # Call the Calendar API
+        events_result = service.events().list(
+            calendarId='primary',
+            timeMin=now.isoformat() + 'Z',
+            timeMax=time_max.isoformat() + 'Z',
+            maxResults=max_results,
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        
+        events = events_result.get('items', [])
+        
+        if not events:
+            return f"No upcoming events found in the next {days_ahead} days."
+        
+        lines = [f"Found {len(events)} upcoming events in the next {days_ahead} days:"]
+        for event in events:
+            start = event['start'].get('dateTime', event['start'].get('date'))
+            title = event.get('summary', '(No title)')
+            lines.append(f"- {title} at {start}")
+        
+        return "\n".join(lines)
+    except ValueError as e:
+        return f"Calendar configuration error: {e}"
+    except ImportError:
+        return "Error: Google Calendar packages not installed. Run: python -m pip install google-api-python-client google-auth-oauthlib"
+    except Exception as e:
+        return f"Error listing calendar events: {e}"
+
+
+# ---- Media Control Tools ----
+def media_play_pause() -> str:
+    """Toggle play/pause for the currently active media application."""
+    try:
+        import pywinauto.keyboard
+        # Send Play/Pause media key (VK_MEDIA_PLAY_PAUSE = 0xB3)
+        pywinauto.keyboard.send_keys('{VK_MEDIA_PLAY_PAUSE}')
+        return "Toggled play/pause"
+    except ImportError:
+        return "Error: pywinauto package not installed. Run: python -m pip install pywinauto"
+    except Exception as e:
+        return f"Error toggling play/pause: {e}"
+
+
+def media_next() -> str:
+    """Skip to the next track."""
+    try:
+        import pywinauto.keyboard
+        # Send Next media key (VK_MEDIA_NEXT_TRACK = 0xB0)
+        pywinauto.keyboard.send_keys('{VK_MEDIA_NEXT_TRACK}')
+        return "Skipped to next track"
+    except ImportError:
+        return "Error: pywinauto package not installed. Run: python -m pip install pywinauto"
+    except Exception as e:
+        return f"Error skipping to next track: {e}"
+
+
+def media_previous() -> str:
+    """Go to the previous track."""
+    try:
+        import pywinauto.keyboard
+        # Send Previous media key (VK_MEDIA_PREV_TRACK = 0xB1)
+        pywinauto.keyboard.send_keys('{VK_MEDIA_PREV_TRACK}')
+        return "Went to previous track"
+    except ImportError:
+        return "Error: pywinauto package not installed. Run: python -m pip install pywinauto"
+    except Exception as e:
+        return f"Error going to previous track: {e}"
+
+
+def set_volume(level: int) -> str:
+    """Set system volume level (0-100)."""
+    try:
+        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+        from ctypes import cast, POINTER
+        from comtypes import CLSCTX_ALL
+        
+        if level < 0 or level > 100:
+            return "Error: Volume level must be between 0 and 100"
+        
+        devices = AudioUtilities.GetSpeakers()
+        interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        volume = cast(interface, POINTER(IAudioEndpointVolume))
+        
+        # Set volume (0.0 to 1.0)
+        volume.SetMasterVolumeLevelScalar(level / 100.0, None)
+        return f"Set system volume to {level}%"
+    except ImportError:
+        return "Error: pycaw package not installed. Run: python -m pip install pycaw"
+    except Exception as e:
+        return f"Error setting volume: {e}"
+
+
+def get_volume() -> str:
+    """Get current system volume level."""
+    try:
+        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+        from ctypes import cast, POINTER
+        from comtypes import CLSCTX_ALL
+        
+        devices = AudioUtilities.GetSpeakers()
+        interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        volume = cast(interface, POINTER(IAudioEndpointVolume))
+        
+        # Get volume (0.0 to 1.0)
+        level = volume.GetMasterVolumeLevelScalar()
+        return f"Current system volume: {int(level * 100)}%"
+    except ImportError:
+        return "Error: pycaw package not installed. Run: python -m pip install pycaw"
+    except Exception as e:
+        return f"Error getting volume: {e}"
+
+
+# ---- Smart Home Integration (Philips Hue) ----
+def _get_hue_credentials():
+    """Get Philips Hue bridge credentials from environment variables."""
+    bridge_ip = os.environ.get("HUE_BRIDGE_IP")
+    username = os.environ.get("HUE_USERNAME")
+    
+    if not bridge_ip or not username:
+        raise ValueError("HUE_BRIDGE_IP and HUE_USERNAME must be configured in .env to use Hue tools.")
+    
+    return bridge_ip, username
+
+
+def hue_list_lights() -> str:
+    """List all Philips Hue lights with their current state."""
+    try:
+        import requests
+        
+        bridge_ip, username = _get_hue_credentials()
+        url = f"http://{bridge_ip}/api/{username}/lights"
+        
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        
+        lights = response.json()
+        if not lights:
+            return "No Hue lights found."
+        
+        lines = [f"Found {len(lights)} Hue lights:"]
+        for light_id, light_data in lights.items():
+            name = light_data.get("name", "Unknown")
+            state = light_data.get("state", {})
+            on = state.get("on", False)
+            brightness = state.get("bri", 0)
+            brightness_pct = int((brightness / 254) * 100) if brightness else 0
+            status = f"ON ({brightness_pct}%)" if on else "OFF"
+            lines.append(f"- {name} (ID: {light_id}): {status}")
+        
+        return "\n".join(lines)
+    except ValueError as e:
+        return f"Hue configuration error: {e}"
+    except ImportError:
+        return "Error: requests package not installed. Run: python -m pip install requests"
+    except Exception as e:
+        return f"Error listing Hue lights: {e}"
+
+
+def hue_set_light(light_id: str, on: bool = None, brightness: int = None) -> str:
+    """Control a Philips Hue light (turn on/off, set brightness)."""
+    try:
+        import requests
+        
+        bridge_ip, username = _get_hue_credentials()
+        url = f"http://{bridge_ip}/api/{username}/lights/{light_id}/state"
+        
+        payload = {}
+        if on is not None:
+            payload["on"] = on
+        if brightness is not None:
+            if brightness < 0 or brightness > 100:
+                return "Error: Brightness must be between 0 and 100"
+            payload["bri"] = int((brightness / 100) * 254)
+        
+        if not payload:
+            return "Error: No changes specified (provide on or brightness)"
+        
+        response = requests.put(url, json=payload, timeout=5)
+        response.raise_for_status()
+        
+        return f"Successfully updated Hue light {light_id}"
+    except ValueError as e:
+        return f"Hue configuration error: {e}"
+    except ImportError:
+        return "Error: requests package not installed. Run: python -m pip install requests"
+    except Exception as e:
+        return f"Error setting Hue light: {e}"
 
 
 def shutdown_or_restart(action: str) -> str:
@@ -221,6 +596,8 @@ def web_search(query: str, max_results: int = 5) -> str:
             snippet = _clean_text(r.get("body") or r.get("snippet", ""))
             formatted.append(f"{i}. [{title}]({url})\n   {snippet}")
         return "\n\n".join(formatted)
+    except (ConnectionError, TimeoutError) as e:
+        return f"Network error during web search: {e}"
     except Exception as e:
         return f"Error during web search: {e}"
 
@@ -251,6 +628,10 @@ def read_webpage(url: str, max_chars: int = 4000) -> str:
         if len(content) > max_chars:
             content = content[:max_chars] + f"\n\n... [output truncated at {max_chars} chars]"
         return content
+    except httpx.HTTPStatusError as e:
+        return f"HTTP error reading webpage {url}: {e.response.status_code}"
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
+        return f"Network error reading webpage {url}: {e}"
     except Exception as e:
         return f"Error reading webpage {url}: {e}"
 
@@ -271,8 +652,12 @@ def whatsapp_status() -> str:
                 "The user needs to scan the QR code displayed in the bridge terminal."
             )
         return f"WhatsApp status: {data}"
+    except httpx.ConnectError:
+        return f"WhatsApp bridge offline or unreachable. Start the bridge service on port 3001."
+    except httpx.TimeoutException:
+        return f"WhatsApp bridge timed out. Check if the bridge is running on port 3001."
     except Exception as e:
-        return f"WhatsApp bridge offline or unreachable ({e}). Start the bridge service on port 3001."
+        return f"WhatsApp bridge error: {e}. Start the bridge service on port 3001."
 
 
 def whatsapp_list_contacts(limit: int = 30, query: str = "") -> str:
@@ -392,6 +777,112 @@ def whatsapp_send_message(chat_id: str, message: str) -> str:
         return f"Error sending WhatsApp message: {e}"
 
 
+def whatsapp_call(recipient: str) -> str:
+    """Initiate a WhatsApp voice/VoIP call to a contact name or phone number.
+    On mobile, this triggers a direct native WhatsApp VoIP call.
+    Resolves contact names and phone numbers via WhatsApp contacts.
+    """
+    cleaned = recipient.replace("on whatsapp", "").replace("via whatsapp", "").replace("whatsapp", "").strip()
+    target_number = ""
+    contact_name = cleaned
+
+    digits_only = re.sub(r"[\s\-\(\)\.]", "", cleaned)
+    if re.match(r"^\+?[0-9]{5,16}$", digits_only):
+        target_number = digits_only if digits_only.startswith("+") else ("+" + digits_only if len(digits_only) > 8 else digits_only)
+        # Attempt to find if there is an associated name in WhatsApp contacts
+        try:
+            r = httpx.get(f"{WA_BRIDGE_URL}/contacts", timeout=5)
+            if r.status_code == 200:
+                contacts = r.json().get("contacts", [])
+                num_clean = digits_only.replace("+", "")
+                for c in contacts:
+                    c_num = (c.get("number") or c.get("id") or "").split("@")[0]
+                    if num_clean.endswith(c_num) or c_num.endswith(num_clean) or (len(num_clean) >= 7 and num_clean[-7:] in c_num):
+                        found_name = c.get("name") or c.get("pushname")
+                        if found_name:
+                            contact_name = found_name
+                            break
+        except Exception:
+            pass
+    else:
+        try:
+            r = httpx.get(f"{WA_BRIDGE_URL}/contacts", timeout=10)
+            if r.status_code == 200:
+                contacts = r.json().get("contacts", [])
+                q = cleaned.lower()
+                for c in contacts:
+                    name = (c.get("name") or c.get("pushname") or "").lower()
+                    num = c.get("number") or ""
+                    cid = c.get("id") or ""
+                    if q in name or name in q:
+                        contact_name = c.get("name") or c.get("pushname") or cleaned
+                        target_number = num or cid.split("@")[0]
+                        if target_number and not target_number.startswith("+") and len(target_number) > 8:
+                            target_number = "+" + target_number
+                        break
+        except Exception:
+            pass
+
+    action_tag = f"[ACTION:CALL_WHATSAPP:name={contact_name};phone={target_number}]"
+    if target_number:
+        return f"{action_tag}\nCalling {contact_name} on WhatsApp ({target_number}). Triggering WhatsApp call..."
+    else:
+        return f"{action_tag}\nCalling {contact_name} on WhatsApp. Triggering WhatsApp call..."
+
+
+def make_phone_call(recipient: str) -> str:
+    """Initiate a phone call to a contact name or phone number.
+    By default, routes calls to WhatsApp voice/VoIP.
+    If cellular or standard dialer is explicitly requested, opens the system dialer.
+    """
+    lower = recipient.lower()
+    is_explicit_cellular = any(w in lower for w in ["cellular", "cell call", "sim", "dialer", "regular call", "normal call"])
+    if not is_explicit_cellular:
+        return whatsapp_call(recipient)
+
+    cleaned = recipient.strip()
+    target_number = ""
+    contact_name = cleaned
+
+    # Check if recipient is already a phone number
+    digits_only = re.sub(r"[\s\-\(\)\.]", "", cleaned)
+    if re.match(r"^\+?[0-9]{5,16}$", digits_only):
+        target_number = digits_only
+    else:
+        # Search WhatsApp contacts for matching name
+        try:
+            r = httpx.get(f"{WA_BRIDGE_URL}/contacts", timeout=10)
+            if r.status_code == 200:
+                contacts = r.json().get("contacts", [])
+                q = cleaned.lower()
+                for c in contacts:
+                    name = (c.get("name") or c.get("pushname") or "").lower()
+                    num = c.get("number") or ""
+                    cid = c.get("id") or ""
+                    if q in name or name in q:
+                        contact_name = c.get("name") or c.get("pushname") or cleaned
+                        target_number = num or cid.split("@")[0]
+                        if target_number and not target_number.startswith("+") and len(target_number) > 8:
+                            target_number = "+" + target_number
+                        break
+        except Exception:
+            pass
+
+    if not target_number:
+        return f"Could not find a phone number for '{recipient}'. Please specify the phone number directly (e.g. 'call +123456789')."
+
+    tel_uri = f"tel:{target_number}"
+
+    # If running on Windows PC, trigger default system dialer / Phone Link
+    try:
+        if os.name == "nt":
+            subprocess.Popen(["cmd", "/c", "start", tel_uri], shell=True)
+    except Exception:
+        pass
+
+    return f"[ACTION:CALL:{tel_uri}]\nCalling {contact_name} ({target_number}). Opening phone dialer..."
+
+
 # ---- Email Tools (IMAP / SMTP) ----
 def _get_email_credentials():
     address = os.environ.get("EMAIL_ADDRESS")
@@ -449,6 +940,10 @@ def email_list_unread(limit: int = 5) -> str:
 
         mail.logout()
         return "\n".join(results)
+    except ValueError as e:
+        return f"Email configuration error: {e}"
+    except imaplib.IMAP4.error as e:
+        return f"IMAP error: {e}"
     except Exception as e:
         return f"Error listing unread emails: {e}"
 
@@ -520,6 +1015,10 @@ def email_read(email_id: str) -> str:
             f"Subject: {_clean_text(subject)}\n\n"
             f"--- Content ---\n{clean_body if clean_body else '(Empty body)'}"
         )
+    except ValueError as e:
+        return f"Email configuration error: {e}"
+    except imaplib.IMAP4.error as e:
+        return f"IMAP error: {e}"
     except Exception as e:
         return f"Error reading email {email_id}: {e}"
 
@@ -536,7 +1035,11 @@ def email_search(query: str, limit: int = 5) -> str:
         mail.login(address, password)
         mail.select("INBOX")
 
-        clean_q = query.replace('"', '').strip()
+        # Sanitize query to prevent IMAP injection
+        clean_q = query.replace('"', '').replace('\\', '').strip()[:100]
+        if not clean_q:
+            return "Error: Search query is empty after sanitization."
+        
         # Search in SUBJECT, FROM, or TEXT
         search_criteria = f'(OR (OR SUBJECT "{clean_q}" FROM "{clean_q}") BODY "{clean_q}")'
         status, messages = mail.search(None, search_criteria)
@@ -574,6 +1077,10 @@ def email_search(query: str, limit: int = 5) -> str:
 
         mail.logout()
         return "\n".join(results)
+    except ValueError as e:
+        return f"Email configuration error: {e}"
+    except imaplib.IMAP4.error as e:
+        return f"IMAP error: {e}"
     except Exception as e:
         return f"Error searching emails: {e}"
 
@@ -602,6 +1109,12 @@ def email_send(to_email: str, subject: str, body: str) -> str:
         server.quit()
 
         return f"Successfully sent email to {to_email} with subject: '{subject}'"
+    except ValueError as e:
+        return f"Email configuration error: {e}"
+    except smtplib.SMTPAuthenticationError:
+        return "SMTP authentication failed. Check your email credentials."
+    except smtplib.SMTPException as e:
+        return f"SMTP error: {e}"
     except Exception as e:
         return f"Error sending email: {e}"
 
@@ -787,6 +1300,166 @@ TOOL_SCHEMAS = MEMORY_TOOL_SCHEMAS + GOAL_TOOL_SCHEMAS + [
         "name": "system_info",
         "description": "Get current CPU, RAM, and disk usage.",
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "take_screenshot",
+        "description": "Capture a screenshot of the primary monitor and save it to a PNG file in the current directory.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Output filename (default 'screenshot.png'). Only a simple filename, no path allowed.",
+                    "default": "screenshot.png",
+                },
+            },
+        },
+    },
+    {
+        "name": "get_clipboard_text",
+        "description": "Read the current text content from the system clipboard.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "set_clipboard_text",
+        "description": "Set the system clipboard to the provided text.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The text to copy to the clipboard",
+                },
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "list_windows",
+        "description": "List all visible windows with their titles.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "minimize_window",
+        "description": "Minimize a window by its title (partial match).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Window title to minimize (partial match supported)",
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "maximize_window",
+        "description": "Maximize a window by its title (partial match).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Window title to maximize (partial match supported)",
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "close_window",
+        "description": "Close a window by its title (partial match). DESTRUCTIVE - requires user confirmation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Window title to close (partial match supported)",
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "list_calendar_events",
+        "description": "List upcoming Google Calendar events for the next few days.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of events to return (default 10)",
+                    "default": 10,
+                },
+                "days_ahead": {
+                    "type": "integer",
+                    "description": "Number of days ahead to look for events (default 7)",
+                    "default": 7,
+                },
+            },
+        },
+    },
+    {
+        "name": "media_play_pause",
+        "description": "Toggle play/pause for the currently active media application (Spotify, YouTube, etc.).",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "media_next",
+        "description": "Skip to the next track in the currently active media application.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "media_previous",
+        "description": "Go to the previous track in the currently active media application.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "set_volume",
+        "description": "Set the system master volume level (0-100).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "level": {
+                    "type": "integer",
+                    "description": "Volume level from 0 to 100",
+                },
+            },
+            "required": ["level"],
+        },
+    },
+    {
+        "name": "get_volume",
+        "description": "Get the current system master volume level.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "hue_list_lights",
+        "description": "List all Philips Hue lights with their current state (on/off, brightness).",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "hue_set_light",
+        "description": "Control a Philips Hue light (turn on/off, set brightness 0-100).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "light_id": {
+                    "type": "string",
+                    "description": "The light ID (e.g., '1', '2', etc.)",
+                },
+                "on": {
+                    "type": "boolean",
+                    "description": "Turn the light on (true) or off (false)",
+                },
+                "brightness": {
+                    "type": "integer",
+                    "description": "Brightness level from 0 to 100",
+                },
+            },
+            "required": ["light_id"],
+        },
     },
     {
         "name": "shutdown_or_restart",
@@ -986,6 +1659,34 @@ TOOL_SCHEMAS = MEMORY_TOOL_SCHEMAS + GOAL_TOOL_SCHEMAS + [
             "required": ["to_email", "subject", "body"],
         },
     },
+    {
+        "name": "make_phone_call",
+        "description": "Initiate a regular phone call to a phone number or contact name. Resolves contact numbers via WhatsApp contacts and opens the phone dialer.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "recipient": {
+                    "type": "string",
+                    "description": "The contact name (e.g. 'Mom', 'Alex') or phone number (e.g. '+1234567890', '0412345678') to call",
+                },
+            },
+            "required": ["recipient"],
+        },
+    },
+    {
+        "name": "whatsapp_call",
+        "description": "Initiate a direct WhatsApp voice/VoIP call to a contact name or phone number on mobile. Use this when the user asks to call someone on WhatsApp.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "recipient": {
+                    "type": "string",
+                    "description": "The contact name (e.g. 'Mom', 'Alex') or phone number to call via WhatsApp",
+                },
+            },
+            "required": ["recipient"],
+        },
+    },
 ]
 
 TOOL_FUNCTIONS = {
@@ -998,6 +1699,21 @@ TOOL_FUNCTIONS = {
     "list_processes": list_processes,
     "kill_process": kill_process,
     "system_info": system_info,
+    "take_screenshot": take_screenshot,
+    "get_clipboard_text": get_clipboard_text,
+    "set_clipboard_text": set_clipboard_text,
+    "list_windows": list_windows,
+    "minimize_window": minimize_window,
+    "maximize_window": maximize_window,
+    "close_window": close_window,
+    "list_calendar_events": list_calendar_events,
+    "media_play_pause": media_play_pause,
+    "media_next": media_next,
+    "media_previous": media_previous,
+    "set_volume": set_volume,
+    "get_volume": get_volume,
+    "hue_list_lights": hue_list_lights,
+    "hue_set_light": hue_set_light,
     "shutdown_or_restart": shutdown_or_restart,
     "web_search": web_search,
     "read_webpage": read_webpage,
@@ -1007,6 +1723,8 @@ TOOL_FUNCTIONS = {
     "whatsapp_search_chats": whatsapp_search_chats,
     "whatsapp_read_messages": whatsapp_read_messages,
     "whatsapp_send_message": whatsapp_send_message,
+    "make_phone_call": make_phone_call,
+    "whatsapp_call": whatsapp_call,
     "email_list_unread": email_list_unread,
     "email_read": email_read,
     "email_search": email_search,
