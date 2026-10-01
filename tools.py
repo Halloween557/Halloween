@@ -275,6 +275,50 @@ def whatsapp_status() -> str:
         return f"WhatsApp bridge offline or unreachable ({e}). Start the bridge service on port 3001."
 
 
+def whatsapp_list_contacts(limit: int = 30, query: str = "") -> str:
+    """List WhatsApp contacts saved on your phone with names, phone numbers, and IDs."""
+    try:
+        r = httpx.get(f"{WA_BRIDGE_URL}/contacts", timeout=12)
+        if r.status_code != 200:
+            return f"WhatsApp Bridge error ({r.status_code}): {r.text}"
+        data = r.json()
+        contacts = data.get("contacts", [])
+        if not contacts:
+            return "No saved WhatsApp contacts found."
+
+        if query:
+            q = query.lower().strip()
+            contacts = [
+                c for c in contacts
+                if q in (c.get("name") or "").lower() or q in (c.get("number") or "").lower()
+            ]
+            if not contacts:
+                return f"No WhatsApp contacts found matching '{query}'."
+
+        seen = set()
+        unique = []
+        for c in contacts:
+            name = (c.get("name") or "").strip()
+            num = (c.get("number") or "").strip()
+            cid = c.get("id") or (f"{num}@c.us" if num else "")
+            key = cid or name
+            if key and key not in seen:
+                seen.add(key)
+                unique.append(c)
+
+        unique = unique[:limit]
+        lines = [f"Found {len(unique)} WhatsApp contacts:"]
+        for c in unique:
+            name = c.get("name") or "Unknown"
+            num = c.get("number") or ""
+            cid = c.get("id") or ""
+            saved = " (Saved Contact)" if c.get("isMyContact") else ""
+            lines.append(f"- {name}: {num} [ID: {cid}]{saved}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error listing WhatsApp contacts: {e}"
+
+
 def whatsapp_list_chats(limit: int = 15) -> str:
     """List recent WhatsApp chats with last message and unread count."""
     try:
@@ -791,6 +835,24 @@ TOOL_SCHEMAS = MEMORY_TOOL_SCHEMAS + GOAL_TOOL_SCHEMAS + [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "whatsapp_list_contacts",
+        "description": "List WhatsApp contacts saved on your phone with names, phone numbers, and WhatsApp IDs.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of contacts to retrieve (default 30)",
+                    "default": 30,
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Optional search filter by contact name or phone number",
+                },
+            },
+        },
+    },
+    {
         "name": "whatsapp_list_chats",
         "description": "List recent WhatsApp chats with contact/group names, IDs, unread count, and last message snippet.",
         "input_schema": {
@@ -940,6 +1002,7 @@ TOOL_FUNCTIONS = {
     "web_search": web_search,
     "read_webpage": read_webpage,
     "whatsapp_status": whatsapp_status,
+    "whatsapp_list_contacts": whatsapp_list_contacts,
     "whatsapp_list_chats": whatsapp_list_chats,
     "whatsapp_search_chats": whatsapp_search_chats,
     "whatsapp_read_messages": whatsapp_read_messages,

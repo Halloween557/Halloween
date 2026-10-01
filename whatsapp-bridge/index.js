@@ -239,6 +239,34 @@ app.get('/qr', (req, res) => {
 });
 
 
+function fmtChat(c) {
+    if (!c) return {};
+    const id = c.id ? (c.id._serialized || String(c.id)) : '';
+    return {
+        id,
+        name: c.name || c.formattedTitle || c.pushname || id || 'Unknown',
+        isGroup: c.isGroup || false,
+        unreadCount: c.unreadCount || 0,
+        lastMessage: c.lastMessage ? {
+            body: c.lastMessage.body || '',
+            timestamp: c.lastMessage.timestamp || 0
+        } : null,
+        pinned: c.pinned || false
+    };
+}
+
+function fmtMsg(m) {
+    if (!m) return {};
+    const id = m.id ? (m.id._serialized || String(m.id)) : '';
+    return {
+        id,
+        fromMe: m.fromMe || false,
+        body: m.body || '',
+        time: m.timestamp ? new Date(m.timestamp * 1000).toISOString() : new Date().toISOString(),
+        author: m.author || m.from || ''
+    };
+}
+
 // List recent chats
 app.get('/chats', async (req, res) => {
     if (!requireReady(res)) return;
@@ -255,10 +283,10 @@ app.get('/chats', async (req, res) => {
             // Fallback for newer WhatsApp Web clients where getChats() encounters non-standard chat objects
             const contacts = await client.getContacts();
             const recentContacts = contacts
-                .filter(c => c.isMyContact || c.name)
+                .filter(c => c && (c.isMyContact || c.name || c.pushname))
                 .slice(0, Math.min(parseInt(req.query.limit, 10) || 20, 50))
                 .map(c => ({
-                    id: c.id._serialized,
+                    id: c.id ? (c.id._serialized || String(c.id)) : (c.number ? `${c.number}@c.us` : ''),
                     name: c.name || c.pushname || c.number || 'Unknown',
                     isGroup: c.isGroup || false,
                     unreadCount: 0,
